@@ -9,6 +9,8 @@ import net.trivernis.chunkmaster.lib.shapes.Square
 import org.bukkit.Server
 import org.bukkit.World
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 class GenerationManager(private val chunkmaster: Chunkmaster, private val server: Server) {
 
@@ -189,14 +191,27 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
      * Stops all generation tasks
      */
     fun stopAll() {
+        chunkmaster.logger.info("[DIAG] stopAll start tasks=${tasks.size} unloaderPending=${unloader.pendingSize}") // DIAG: remove after bug fix
         val removalSet = HashSet<RunningTaskEntry>()
         for (task in tasks) {
             val id = task.id
             chunkmaster.logger.info(chunkmaster.langManager.getLocalized("SAVING_TASK_PROGRESS", task.id))
-            saveProgressToDatabase(task.generationTask, id).join()
+            chunkmaster.logger.info("[DIAG] stopAll: saving task=$id to db") // DIAG: remove after bug fix
+            val diagSaveStart = System.currentTimeMillis() // DIAG: remove after bug fix
+            // Bounded wait — Bukkit async chains may never complete during onDisable, don't hang shutdown
+            try {
+                saveProgressToDatabase(task.generationTask, id).get(10, TimeUnit.SECONDS)
+            } catch (e: TimeoutException) {
+                chunkmaster.logger.warning("[Chunkmaster] saveProgressToDatabase task=$id timed out after 10s, continuing shutdown")
+            } catch (e: Exception) {
+                chunkmaster.logger.warning("[Chunkmaster] saveProgressToDatabase task=$id failed: $e")
+            }
+            chunkmaster.logger.info("[DIAG] stopAll: saved task=$id took ${System.currentTimeMillis() - diagSaveStart}ms, cancelling") // DIAG: remove after bug fix
+            val diagCancelStart = System.currentTimeMillis() // DIAG: remove after bug fix
             if (!task.cancel(chunkmaster.config.getLong("mspt-pause-threshold"))) {
                 chunkmaster.logger.warning(chunkmaster.langManager.getLocalized("CANCEL_FAIL", task.id))
             }
+            chunkmaster.logger.info("[DIAG] stopAll: cancelled task=$id took ${System.currentTimeMillis() - diagCancelStart}ms") // DIAG: remove after bug fix
             removalSet.add(task)
 
             chunkmaster.logger.info(chunkmaster.langManager.getLocalized("TASK_CANCELLED", task.id))
@@ -204,8 +219,12 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
         tasks.removeAll(removalSet)
         if (unloader.pendingSize > 0) {
             chunkmaster.logger.info(chunkmaster.langManager.getLocalized("SAVING_CHUNKS", unloader.pendingSize))
+            chunkmaster.logger.info("[DIAG] stopAll: running unloader with ${unloader.pendingSize} chunks") // DIAG: remove after bug fix
+            val diagUnloadStart = System.currentTimeMillis() // DIAG: remove after bug fix
             unloader.run()
+            chunkmaster.logger.info("[DIAG] stopAll: unloader.run done in ${System.currentTimeMillis() - diagUnloadStart}ms") // DIAG: remove after bug fix
         }
+        chunkmaster.logger.info("[DIAG] stopAll done") // DIAG: remove after bug fix
     }
 
     /**
@@ -330,6 +349,13 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
                 genTask.lastChunkCoords.z
             )
         )
+        // DIAG: remove after bug fix
+        if (genTask is DefaultGenerationTask) {
+            val maxPending = chunkmaster.config.getInt("generation.max-pending-chunks")
+            chunkmaster.logger.info(
+                "[DIAG] task=${task.id} pendingChunks=${genTask.pendingChunks.size}/$maxPending unloaderPending=${unloader.pendingSize} threadState=${task.threadState} mspt=${chunkmaster.mspt}"
+            )
+        }
     }
 
     /**

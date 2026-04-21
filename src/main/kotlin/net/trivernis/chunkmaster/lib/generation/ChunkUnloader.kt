@@ -26,9 +26,16 @@ class ChunkUnloader(private val plugin: Chunkmaster) : Runnable {
      * Unloads all chunks in the unloading queue with each run
      */
     override fun run() {
+        val diagStart = System.currentTimeMillis() // DIAG: remove after bug fix
         lock.writeLock().lock()
+        val diagQueueSize: Int // DIAG: remove after bug fix
         try {
             val chunkToUnload = unloadingQueue.toHashSet()
+            diagQueueSize = chunkToUnload.size // DIAG: remove after bug fix
+            // DIAG: remove after bug fix
+            if (diagQueueSize >= maxLoadedChunks - 50) {
+                plugin.logger.info("[DIAG] unloader.run start size=$diagQueueSize/$maxLoadedChunks")
+            }
 
             for (chunk in chunkToUnload) {
                 try {
@@ -40,6 +47,11 @@ class ChunkUnloader(private val plugin: Chunkmaster) : Runnable {
             unloadingQueue.clear()
         } finally {
             lock.writeLock().unlock()
+        }
+        // DIAG: remove after bug fix
+        val diagMs = System.currentTimeMillis() - diagStart
+        if (diagMs > 200 && diagQueueSize > 0) {
+            plugin.logger.info("[DIAG] unloader.run done size=$diagQueueSize took ${diagMs}ms")
         }
     }
 

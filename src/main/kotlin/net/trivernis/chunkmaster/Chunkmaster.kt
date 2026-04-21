@@ -64,9 +64,13 @@ open class Chunkmaster : JavaPlugin() {
      * Stop all tasks and close database connection on disable
      */
     override fun onDisable() {
+        logger.info("[DIAG] onDisable start") // DIAG: remove after bug fix
+        val diagStart = System.currentTimeMillis() // DIAG: remove after bug fix
         logger.info(langManager.getLocalized("STOPPING_ALL_TASKS"))
         generationManager.stopAll()
+        logger.info("[DIAG] onDisable stopAll finished in ${System.currentTimeMillis() - diagStart}ms, cancelling scheduler tasks") // DIAG: remove after bug fix
         server.scheduler.cancelTasks(this)
+        logger.info("[DIAG] onDisable complete in ${System.currentTimeMillis() - diagStart}ms total") // DIAG: remove after bug fix
     }
 
     /**

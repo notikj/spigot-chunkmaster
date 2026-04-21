@@ -5,6 +5,7 @@ import net.trivernis.chunkmaster.Chunkmaster
 import net.trivernis.chunkmaster.lib.shapes.Shape
 import org.bukkit.World
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
 
 class DefaultGenerationTask(
     private val plugin: Chunkmaster,
@@ -22,6 +23,9 @@ class DefaultGenerationTask(
 
     override var count = 0
     override var endReached: Boolean = false
+
+    private val diagCompletedCount = java.util.concurrent.atomic.AtomicLong(0) // DIAG: remove after bug fix
+    private val diagPutCount = java.util.concurrent.atomic.AtomicLong(0) // DIAG: remove after bug fix
 
     init {
         updateGenerationAreaMarker()
@@ -62,6 +66,7 @@ class DefaultGenerationTask(
     override fun generateMissing() {
         val missing = this.missingChunks.toHashSet()
         this.count = 0
+        var diagIter = 0 // DIAG: remove after bug fix
 
         while (missing.size > 0 && !cancelRun) {
             if (plugin.mspt < msptThreshold && !unloader.isFull) {
@@ -72,9 +77,15 @@ class DefaultGenerationTask(
             } else {
                 Thread.sleep(50L)
             }
+            // DIAG: remove after bug fix
+            if (diagIter++ % 200 == 0) {
+                plugin.logger.info("[DIAG] generateMissing iter=$diagIter missing=${missing.size} mspt=${plugin.mspt} unloaderFull=${unloader.isFull} unloaderPending=${unloader.pendingSize} pendingChunks=${pendingChunks.size}/$maxPendingChunks")
+            }
         }
         if (!cancelRun) {
+            plugin.logger.info("[DIAG] generateMissing exited, joinPending starting, pendingChunks=${pendingChunks.size}") // DIAG: remove after bug fix
             this.joinPending()
+            plugin.logger.info("[DIAG] generateMissing joinPending done") // DIAG: remove after bug fix
         }
     }
 
@@ -93,6 +104,7 @@ class DefaultGenerationTask(
      */
     private fun generateUntilBorder() {
         var chunkCoordinates: ChunkCoordinates
+        var diagIter = 0 // DIAG: remove after bug fix
 
         while (!cancelRun && !borderReached()) {
             if (plugin.mspt < msptThreshold && !unloader.isFull) {
@@ -104,14 +116,25 @@ class DefaultGenerationTask(
             } else {
                 Thread.sleep(50L)
             }
+            // DIAG: remove after bug fix
+            if (diagIter++ % 200 == 0) {
+                plugin.logger.info("[DIAG] generateUntilBorder iter=$diagIter mspt=${plugin.mspt} unloaderFull=${unloader.isFull} unloaderPending=${unloader.pendingSize} pendingChunks=${pendingChunks.size}/$maxPendingChunks putCount=${diagPutCount.get()} completedCount=${diagCompletedCount.get()}")
+            }
         }
         if (!cancelRun) {
+            plugin.logger.info("[DIAG] generateUntilBorder exited, joinPending starting, pendingChunks=${pendingChunks.size}") // DIAG: remove after bug fix
             joinPending()
+            plugin.logger.info("[DIAG] generateUntilBorder joinPending done") // DIAG: remove after bug fix
         }
     }
 
     private fun joinPending() {
+        var diagJoinIter = 0 // DIAG: remove after bug fix
         while (!this.pendingChunks.isEmpty()) {
+            // DIAG: remove after bug fix
+            if (diagJoinIter++ % 20 == 0) {
+                plugin.logger.info("[DIAG] joinPending waiting iter=$diagJoinIter pendingChunks=${pendingChunks.size} putCount=${diagPutCount.get()} completedCount=${diagCompletedCount.get()}")
+            }
             Thread.sleep(msptThreshold)
         }
     }
@@ -125,10 +148,56 @@ class DefaultGenerationTask(
                 chunkCoordinates,
                 PaperLib.getChunkAtAsync(world, chunkCoordinates.x, chunkCoordinates.z, true)
             )
-            this.pendingChunks.put(pendingChunkEntry)
-            pendingChunkEntry.chunk.thenAccept {
-                this.unloader.add(it)
+            // DIAG: remove after bug fix
+            val diagSizeBefore = pendingChunks.size
+            val diagNearFull = diagSizeBefore >= maxPendingChunks - 50
+            if (diagNearFull) {
+                plugin.logger.info("[DIAG] put start size=$diagSizeBefore/$maxPendingChunks at ${chunkCoordinates.x},${chunkCoordinates.z}")
+            }
+            val diagPutStart = System.currentTimeMillis()
+            // Bounded wait — if Paper callbacks stall, don't block the generation thread forever
+            val accepted = this.pendingChunks.offer(pendingChunkEntry, 30, TimeUnit.SECONDS)
+            // DIAG: remove after bug fix
+            val diagPutMs = System.currentTimeMillis() - diagPutStart
+            diagPutCount.incrementAndGet()
+            if (diagPutMs > 500 || diagNearFull) {
+                plugin.logger.info("[DIAG] put done took ${diagPutMs}ms accepted=$accepted size=${pendingChunks.size}/$maxPendingChunks")
+            }
+            if (!accepted) {
+                plugin.logger.warning("Pending queue full for 30s at ${chunkCoordinates.x},${chunkCoordinates.z}; skipping chunk and cancelling its future. Re-run generation to fill any gaps.")
+                pendingChunkEntry.chunk.cancel(false)
+                missingChunks.add(chunkCoordinates)
+                return
+            }
+
+            // Safety net — if Paper's future never completes, cancel it after 60s so whenComplete fires
+            val timeoutTask = try {
+                plugin.server.scheduler.runTaskLaterAsynchronously(plugin, Runnable {
+                    if (!pendingChunkEntry.chunk.isDone) {
+                        plugin.logger.warning("Chunk future timed out after 60s at ${chunkCoordinates.x},${chunkCoordinates.z}; cancelling")
+                        pendingChunkEntry.chunk.cancel(false)
+                    }
+                }, 60L * 20L)
+            } catch (e: IllegalStateException) {
+                null
+            }
+
+            pendingChunkEntry.chunk.whenComplete { chunk, err ->
+                if (timeoutTask != null) {
+                    try { timeoutTask.cancel() } catch (_: Exception) {}
+                }
+                if (err == null && chunk != null) {
+                    this.unloader.add(chunk)
+                } else if (err != null && err !is java.util.concurrent.CancellationException) {
+                    plugin.logger.warning("Chunk future failed at ${chunkCoordinates.x},${chunkCoordinates.z}: $err")
+                }
+                // Always remove from queue, even on error/cancel — keeps the queue from filling up forever
                 this.pendingChunks.remove(pendingChunkEntry)
+                // DIAG: remove after bug fix
+                val completedN = diagCompletedCount.incrementAndGet()
+                if (completedN % 200 == 0L) {
+                    plugin.logger.info("[DIAG] whenComplete #$completedN fired at ${chunkCoordinates.x},${chunkCoordinates.z} pending=${pendingChunks.size} err=$err")
+                }
             }
         }
     }
@@ -139,7 +208,11 @@ class DefaultGenerationTask(
      */
     override fun cancel() {
         this.cancelRun = true
-        this.pendingChunks.forEach { it.chunk.cancel(false) }
+        // Snapshot first — clearing the queue while futures are still being cancelled would race
+        val snapshot = this.pendingChunks.toList()
+        snapshot.forEach { it.chunk.cancel(false) }
+        // Force-empty the queue so any blocked put() / joinPending() loop exits immediately
+        this.pendingChunks.clear()
         updateGenerationAreaMarker(true)
     }
 }
