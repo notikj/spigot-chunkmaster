@@ -30,7 +30,7 @@ abstract class GenerationTask(
     protected val msptThreshold = plugin.config.getLong("generation.mspt-pause-threshold")
     protected var cancelRun: Boolean = false
 
-    private var endReachedCallback: ((GenerationTask) -> Unit)? = null
+    private val endReachedCallbacks = mutableListOf<(GenerationTask) -> Unit>()
 
     private val dynmapIntegration = plugin.config.getBoolean("dynmap")
     private val dynmap = plugin.dynmapApi
@@ -132,13 +132,13 @@ abstract class GenerationTask(
         endReached = true
         count = shape.count
         updateGenerationAreaMarker(true)
-        endReachedCallback?.invoke(this)
+        endReachedCallbacks.toList().forEach { it.invoke(this) }
     }
 
     /**
-     * Registers end reached callback
+     * Registers end reached callback. Multiple callbacks can be chained — all will fire on completion.
      */
     fun onEndReached(cb: (GenerationTask) -> Unit) {
-        endReachedCallback = cb
+        endReachedCallbacks.add(cb)
     }
 }

@@ -3,6 +3,7 @@ package net.trivernis.chunkmaster
 import io.papermc.lib.PaperLib
 import net.trivernis.chunkmaster.commands.CommandChunkmaster
 import net.trivernis.chunkmaster.lib.LanguageManager
+import net.trivernis.chunkmaster.lib.batch.BatchManager
 import net.trivernis.chunkmaster.lib.database.SqliteManager
 import net.trivernis.chunkmaster.lib.generation.GenerationManager
 import org.bstats.bukkit.Metrics
@@ -13,8 +14,10 @@ import org.dynmap.DynmapAPI
 open class Chunkmaster : JavaPlugin() {
     lateinit var sqliteManager: SqliteManager
     lateinit var generationManager: GenerationManager
+    lateinit var batchManager: BatchManager
     lateinit var langManager: LanguageManager
     private lateinit var tpsTask: BukkitTask
+    private var batchShutdownHook: Thread? = null
     var dynmapApi: DynmapAPI? = null
         private set
     var mspt = 20      // keep track of the milliseconds per tick
@@ -40,6 +43,16 @@ open class Chunkmaster : JavaPlugin() {
         initDatabase()
         generationManager = GenerationManager(this, server)
         generationManager.init()
+
+        batchManager = BatchManager(this)
+        batchManager.init()
+        // Resume after worlds + generation tasks have settled (GenerationManager uses 20-tick delay).
+        server.scheduler.runTaskLater(this, Runnable { batchManager.resume() }, 60L)
+
+        batchShutdownHook = Thread(Runnable {
+            batchManager.finalizeArchiveOnShutdown()
+        }, "Chunkmaster-BatchArchive")
+        Runtime.getRuntime().addShutdownHook(batchShutdownHook)
 
         getCommand("chunkmaster")?.aliases = mutableListOf("chm", "chunkm", "cmaster")
         getCommand("chunkmaster")?.setExecutor(CommandChunkmaster(this, server))

@@ -99,5 +99,8 @@ class CommandChunkmaster(private val chunkmaster: Chunkmaster, private val serve
 
         val cmdCompleted = CmdCompleted(chunkmaster)
         commands[cmdCompleted.name] = cmdCompleted
+
+        val cmdBatch = CmdBatch(chunkmaster)
+        commands[cmdBatch.name] = cmdBatch
     }
 }

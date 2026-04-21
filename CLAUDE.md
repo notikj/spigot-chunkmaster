@@ -49,6 +49,27 @@ User-visible strings go through [LanguageManager](src/main/kotlin/net/trivernis/
 
 If the Dynmap plugin is present and `dynmap: true` in config, the plugin draws a marker showing the area being generated and triggers tile re-rendering for completed chunks. The integration is a soft dependency — wrapped in null-checks throughout.
 
+### Batch jobs (`/chm batch ...`)
+
+[BatchManager](src/main/kotlin/net/trivernis/chunkmaster/lib/batch/BatchManager.kt) drives multi-iteration runs that pre-generate one or more worlds, archive them, wipe them, and repeat. The flow:
+
+1. `startBatch` validates worlds and writes a `batch_jobs` row (state = `GENERATING`). Iteration runs through normal `GenerationManager.addTask` calls per world; when each task hits its end it triggers the next world.
+2. After the last world of an iteration finishes, `finishIteration` writes `pending_archive.json` (the marker file) into `plugins/Chunkmaster/`, sets state to `ARCHIVE_PENDING`, and calls `Bukkit.shutdown()` 60 ticks later. Worlds **must** be unloaded by the server before the archive runs — that's why we shut down rather than archiving in-process.
+3. A JVM shutdown hook registered in [Chunkmaster.onEnable](src/main/kotlin/net/trivernis/chunkmaster/Chunkmaster.kt) calls `BatchManager.finalizeArchiveOnShutdown()`. That hook reads the marker, runs `tar --use-compress-program=zstd` ([BatchArchiveHook](src/main/kotlin/net/trivernis/chunkmaster/lib/batch/BatchArchiveHook.kt)), `deleteRecursively`s the world folders, and updates the DB row directly via JDBC — bumping `current_iteration` and resetting state to `GENERATING`, or marking `COMPLETED` on the last iteration.
+4. On next startup, `BatchManager.resume()` picks up `GENERATING` jobs and starts the next iteration. Jobs found in `ARCHIVE_PENDING` at startup are flagged `FAILED` (means the hook didn't complete).
+
+### JVM shutdown hook constraints (`finalizeArchiveOnShutdown`)
+
+The shutdown hook runs **after** Bukkit has fully stopped, which voids most of the runtime you'd normally rely on. Three traps to remember:
+
+- **Bukkit's plugin JAR is closed before the hook runs.** Any class not already loaded into the JVM throws `IllegalStateException: zip file closed` — including anonymous lambda classes inside our own methods. `BatchManager.preloadAllPluginClasses()` mitigates by `Class.forName`-ing every entry in the plugin JAR during `init()` while the JAR is still open. Do not introduce shutdown-hook code paths that assume new classes can be loaded.
+- **Bukkit's logger is dead** (Log4j2's own shutdown hook runs first and tears it down silently). Diagnostics from the hook must go through `BatchManager.diagLog`, which writes to `plugins/Chunkmaster/shutdown_hook.log` via `FileWriter` and falls back to `System.out`. Never use `plugin.logger` from inside `finalizeArchiveOnShutdown`.
+- **`plugin.server.*` may NPE**, since the Bukkit Server is torn down by hook time. `BatchManager.init()` captures `dataFolder`, `worldContainer`, and the SQLite DB path into final fields (`capturedDataFolder`, etc.) — the hook uses only those. Don't reach back into `plugin.server` from the hook.
+
+### Persistence (batch tables)
+
+[BatchJobs](src/main/kotlin/net/trivernis/chunkmaster/lib/database/BatchJobs.kt) owns two extra tables (`batch_jobs`, `batch_worlds`) created by the same auto-migration mechanism in `SqliteManager`. The shutdown hook bypasses `SqliteManager` entirely (Bukkit async machinery is gone) and goes straight through `java.sql.DriverManager` against the captured DB path.
+
 ## Project status
 
 The upstream project (Trivernis/spigot-chunkmaster) is no longer actively developed; the README points users to Chunky as an alternative. This fork (`сменил репо` commit) exists for local fixes — don't expect upstream PRs to be merged.

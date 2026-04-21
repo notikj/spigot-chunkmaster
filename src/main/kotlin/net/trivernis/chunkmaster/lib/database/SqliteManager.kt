@@ -49,6 +49,27 @@ class SqliteManager(private val chunkmaster: Chunkmaster) {
                 Pair("center_z", "integer NOT NULL"),
                 Pair("shape", "text NOT NULL")
             )
+        ),
+        Pair(
+            "batch_jobs",
+            listOf(
+                Pair("id", "integer PRIMARY KEY AUTOINCREMENT"),
+                Pair("total_iterations", "integer NOT NULL"),
+                Pair("current_iteration", "integer NOT NULL DEFAULT 1"),
+                Pair("state", "text NOT NULL DEFAULT 'PENDING'"),
+                Pair("archive_dir", "text NOT NULL"),
+                Pair("created_at", "integer NOT NULL")
+            )
+        ),
+        Pair(
+            "batch_worlds",
+            listOf(
+                Pair("batch_id", "integer NOT NULL"),
+                Pair("world_name", "text NOT NULL"),
+                Pair("radius", "integer NOT NULL"),
+                Pair("shape", "text NOT NULL DEFAULT 'square'"),
+                Pair("position", "integer NOT NULL")
+            )
         )
     )
     private val needUpdate = HashSet<Pair<String, Pair<String, String>>>()
@@ -60,6 +81,7 @@ class SqliteManager(private val chunkmaster: Chunkmaster) {
     val pendingChunks = PendingChunks(this)
     val generationTasks = GenerationTasks(this)
     val completedGenerationTasks = CompletedGenerationTasks(this)
+    val batchJobs = BatchJobs(this)
 
     /**
      * Returns the connection to the database

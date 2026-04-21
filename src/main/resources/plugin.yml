@@ -24,6 +24,9 @@ commands:
       /<command> getCenter [<world>] - returns the center chunk of the world
       /<command> stats [<world>] - returns some chunk stats for the world or the whole server
       /<command> completed - lists all completed tasks for all worlds
+      /<command> batch start <iterations> <world>:<radius>[:<shape>] ... - generates worlds across N iterations, archiving and resetting between
+      /<command> batch list - lists active batch jobs
+      /<command> batch cancel <id> - cancels a batch job
     aliases:
       - chm
       - chunkm
@@ -62,6 +65,9 @@ permissions:
   chunkmaster.completed:
     description: Allows the completed subcommand.
     default: op
+  chunkmaster.batch:
+    description: Allows the batch subcommand.
+    default: op
   chunkmaster.chunkmaster:
     description: Allows Chunkmaster commands.
     default: op
@@ -75,6 +81,7 @@ permissions:
       - chunkmaster.pause
       - chunkmaster.resume
       - chunkmaster.completed
+      - chunkmaster.batch
       - chunkmaster.tpchunk
       - chunkmaster.reload
       - chunkmaster.setcenter
