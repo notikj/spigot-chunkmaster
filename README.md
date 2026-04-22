@@ -1,14 +1,41 @@
-# chunkmaster [![](https://circleci.com/gh/Trivernis/spigot-chunkmaster.svg?style=shield)](https://app.circleci.com/pipelines/github/Trivernis/spigot-chunkmaster) [![CodeFactor](https://www.codefactor.io/repository/github/trivernis/spigot-chunkmaster/badge)](https://www.codefactor.io/repository/github/trivernis/spigot-chunkmaster) [![](https://img.shields.io/discord/729250668162056313)](https://discord.gg/KZcMAgN)
+# chunkmaster (форк)
 
-<div align="center">
-<h1>This plugin isn't actively developed anymore. If you want to add features feel free to fork it and implement it yourself or use <a href="https://www.spigotmc.org/resources/chunky.81534/">Chunky</a> instead.</h1>
-</div>
+> Форк [Trivernis/spigot-chunkmaster](https://github.com/Trivernis/spigot-chunkmaster). Оригинал больше не развивается. Этот форк существует для локальных правок под Paper/Purpur **1.16.5**.
 
-This plugin can be used to pre-generate the region of a world around the spawn chunk(s).
-The generation automatically pauses when a player joins the server (assuming the server was empty before)
-and resumes when the server is empty again. The generation also auto-resumes after a server
-restart. The plugin tracks the ticks per second and pauses the generation when the tps
-is lower than 2 (configurable).
+Плагин предгенерирует чанки вокруг центра мира. Автоматически ставится на паузу при заходе игроков, возобновляется после рестарта, следит за MSPT и тормозит генерацию при лагах.
+
+## Что изменено в этом форке
+
+### Багфиксы
+
+- **Краш сервера от async chunk-тикетов.** На 1.16.5 `addPluginChunkTicket`/`removePluginChunkTicket` не потокобезопасны — попытка использовать их из воркер-потока (Phase 3.2 префетча соседей) ломала `ChunkMapDistance` и валила тик мира. Откатили, в коде остался комментарий «не делать так на 1.16.5».
+- **`IllegalStateException: WorldSaveEvent may only be triggered synchronously`.** Периодический `world.save()` был запланирован через `runTaskTimerAsynchronously`, а Bukkit на 1.16.5 запрещает фаерить ивенты из не-main потока. Перевели на `runTaskTimer` (sync).
+- **Зависания при `/stop`.** `stopAll()` при выключении мог вечно висеть на `.join()` async-цепочек Bukkit. Теперь все ожидания ограничены таймаутами, dbExecutor сериализует финальный сейв через `.get(10, SECONDS)`.
+- **Удалён `ChunkUnloader`.** Раньше периодически вызывал `chunk.unload(true)` на main-потоке для каждого сгенерированного чанка — лишний тик-косT. Paper сам выгружает чанки, когда спираль уходит дальше; для надёжности раз в 5 минут вызывается `world.save()`.
+
+### Улучшения производительности
+
+- **Семафорная backpressure вместо busy-loop.** Воркер генерации блокируется на `Semaphore(max-pending-chunks)` и просыпается из `whenComplete`-колбэка Paper — без `Thread.sleep`-опросов, без дёргания `missingChunks`. `joinPending()` тоже event-driven (`acquire(N) → release(N)`).
+- **Safety-net на 60с** для зависших chunk-future: если Paper не дёрнет `whenComplete`, future принудительно отменяется и семафор освобождается.
+- **Параллельная фаза `VALIDATING`.** Region-file I/O (`isChunkGenerated`) раскинули по пулу из `generation.validation-threads` (1–16, дефолт 4), батчами по 256. Шейп-walk остаётся последовательным.
+- **Сейвы прогресса вне main-потока.** `saveProgress` снимает иммутабельный снэпшот на main и сбрасывает JDBC-запись на отдельный однопоточный `dbExecutor` — main-поток не ждёт диск.
+
+### Новые фичи
+
+- **Batch-режим (`/chm batch ...`).** Прогоняет несколько итераций генерации миров: сгенерировать → заархивировать (`tar --use-compress-program=zstd`) → удалить мир → следующая итерация. Архивирование делается JVM shutdown-хуком после полной выгрузки миров Bukkit'ом, состояние трекается в SQLite (`batch_jobs` / `batch_worlds`), при рестарте сервер сам подхватывает прерванные джобы.
+
+### Конфиг
+
+Новые ключи:
+
+- `generation.max-pending-chunks` (по умолчанию 100) — размер семафора на in-flight chunk requests.
+- `generation.validation-threads` (по умолчанию 4, диапазон 1–16) — параллелизм фазы VALIDATING.
+
+Старый ключ `generation.unloading-period` больше не используется (см. удаление `ChunkUnloader`).
+
+---
+
+## Оригинальное описание
 
 ## Built with
 
