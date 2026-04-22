@@ -11,9 +11,6 @@ class RunningTaskEntry(
     private var lastChunkCount: Pair<Long, Int>? = null
     private var thread = Thread(generationTask)
 
-    val threadState: Thread.State // DIAG: remove after bug fix
-        get() = thread.state
-
     /**
      * Returns the generation Speed
      */
@@ -48,19 +45,13 @@ class RunningTaskEntry(
     }
 
     fun cancel(timeout: Long): Boolean {
-        // DIAG: remove after bug fix
-        val diagLogger = java.util.logging.Logger.getLogger("Chunkmaster")
-        diagLogger.info("[DIAG] cancel task=$id thread.state=${thread.state} isAlive=${thread.isAlive} isRunning=${generationTask.isRunning}")
         if (generationTask.isRunning) {
             generationTask.cancel()
             thread.interrupt()
         }
         return try {
-            val result = joinThread(timeout)
-            diagLogger.info("[DIAG] cancel task=$id joinThread result=$result isAlive=${thread.isAlive} state=${thread.state}") // DIAG: remove after bug fix
-            result
+            joinThread(timeout)
         } catch (e: InterruptedException) {
-            diagLogger.info("[DIAG] cancel task=$id interrupted") // DIAG: remove after bug fix
             true
         }
     }

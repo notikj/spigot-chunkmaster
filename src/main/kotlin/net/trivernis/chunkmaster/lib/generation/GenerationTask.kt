@@ -12,7 +12,6 @@ import kotlin.math.ceil
 abstract class GenerationTask(
     plugin: Chunkmaster,
     val world: World,
-    protected val unloader: ChunkUnloader,
     val startChunk: ChunkCoordinates,
     val shape: Shape,
     val missingChunks: HashSet<ChunkCoordinates>,

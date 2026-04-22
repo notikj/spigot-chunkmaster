@@ -138,13 +138,15 @@ class SqliteManager(private val chunkmaster: Chunkmaster) {
 
     /**
      * Executes a sql statement on the database.
+     * Synchronized — SQLite has a single shared connection and can be invoked from
+     * the Bukkit main thread, the dedicated DB executor, and async startup callbacks.
      */
+    @Synchronized
     fun executeStatement(sql: String, values: HashMap<Int, Any>, callback: ((ResultSet?) -> Unit)?) {
         val connection = getConnection()
         activeTasks++
         if (connection != null) {
             try {
-                //println("'$sql' with values $values")
                 val statement = connection.prepareStatement(sql)
                 for (parameterValue in values) {
                     statement.setObject(parameterValue.key, parameterValue.value)

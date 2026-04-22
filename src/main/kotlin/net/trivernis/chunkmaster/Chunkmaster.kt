@@ -77,13 +77,9 @@ open class Chunkmaster : JavaPlugin() {
      * Stop all tasks and close database connection on disable
      */
     override fun onDisable() {
-        logger.info("[DIAG] onDisable start") // DIAG: remove after bug fix
-        val diagStart = System.currentTimeMillis() // DIAG: remove after bug fix
         logger.info(langManager.getLocalized("STOPPING_ALL_TASKS"))
         generationManager.stopAll()
-        logger.info("[DIAG] onDisable stopAll finished in ${System.currentTimeMillis() - diagStart}ms, cancelling scheduler tasks") // DIAG: remove after bug fix
         server.scheduler.cancelTasks(this)
-        logger.info("[DIAG] onDisable complete in ${System.currentTimeMillis() - diagStart}ms total") // DIAG: remove after bug fix
     }
 
     /**
@@ -91,11 +87,10 @@ open class Chunkmaster : JavaPlugin() {
      */
     private fun configure() {
         dataFolder.mkdir()
-        config.addDefault("generation.mspt-pause-threshold", 500L)
+        config.addDefault("generation.mspt-pause-threshold", 100L)
         config.addDefault("generation.pause-on-player-count", 1)
-        config.addDefault("generation.max-pending-chunks", 500)
-        config.addDefault("generation.max-loaded-chunks", 1000)
-        config.addDefault("generation.unloading-period", 50L)
+        config.addDefault("generation.max-pending-chunks", 100)
+        config.addDefault("generation.validation-threads", 4)
         config.addDefault("generation.ignore-worldborder", false)
         config.addDefault("generation.autostart", true)
         config.addDefault("database.filename", "chunkmaster.db")

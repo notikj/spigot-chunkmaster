@@ -8,7 +8,7 @@ import net.trivernis.chunkmaster.lib.shapes.Circle
 import net.trivernis.chunkmaster.lib.shapes.Square
 import org.bukkit.Server
 import org.bukkit.World
-import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
@@ -21,10 +21,6 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
     private val generationTasks = chunkmaster.sqliteManager.generationTasks
     private val completedGenerationTasks = chunkmaster.sqliteManager.completedGenerationTasks
 
-    private val unloadingPeriod: Long
-        get() {
-            return chunkmaster.config.getLong("generation.unloading-period")
-        }
     private val pauseOnPlayerCount: Int
         get() {
             return chunkmaster.config.getInt("generation.pause-on-player-count")
@@ -34,11 +30,25 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
             return chunkmaster.config.getBoolean("generation.autostart")
         }
 
+    /**
+     * Single-thread pool for SQLite writes. The connection in SqliteManager is shared
+     * across threads (now @Synchronized), but funnelling periodic saves through one
+     * worker keeps the Bukkit main thread out of JDBC and avoids contention with
+     * quick foreground ops (addTask / removeTask).
+     */
+    private val dbExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "Chunkmaster-DB").apply { isDaemon = true }
+    }
+
+    /**
+     * Sum of currently-loaded chunks across worlds with active generation tasks.
+     * Reads from Bukkit's chunk holder set — no internal queue is maintained anymore
+     * (Paper unloads pre-generated chunks naturally once they fall out of range).
+     */
     val loadedChunkCount: Int
         get() {
-            return unloader.pendingSize
+            return tasks.map { it.generationTask.world.loadedChunks.size }.sum()
         }
-    private val unloader = ChunkUnloader(chunkmaster)
 
 
     val allTasks: HashSet<TaskEntry>
@@ -184,47 +194,72 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
                 this.pauseAll()
             }
         }, 20)
-        server.scheduler.runTaskTimer(chunkmaster, unloader, unloadingPeriod, unloadingPeriod)
+        // Safety-net world save every 5 minutes — Paper's autosave handles most of this,
+        // but generation produces a high volume of dirty chunks worth flushing more often.
+        // Must run on main thread: world.save() fires WorldSaveEvent synchronously on 1.16.5.
+        server.scheduler.runTaskTimer(chunkmaster, Runnable {
+            saveActiveWorlds()
+        }, 6000L, 6000L)
+    }
+
+    /**
+     * Saves every world that currently has a running generation task.
+     * Cheap when nothing is dirty; called from the periodic timer and from stopAll.
+     */
+    private fun saveActiveWorlds() {
+        val worlds = tasks.map { it.generationTask.world }.toHashSet()
+        for (world in worlds) {
+            try {
+                world.save()
+            } catch (e: Exception) {
+                chunkmaster.logger.warning("Failed to save world ${world.name}: $e")
+            }
+        }
     }
 
     /**
      * Stops all generation tasks
      */
     fun stopAll() {
-        chunkmaster.logger.info("[DIAG] stopAll start tasks=${tasks.size} unloaderPending=${unloader.pendingSize}") // DIAG: remove after bug fix
+        val worldsToSave = tasks.map { it.generationTask.world }.toHashSet()
         val removalSet = HashSet<RunningTaskEntry>()
         for (task in tasks) {
             val id = task.id
             chunkmaster.logger.info(chunkmaster.langManager.getLocalized("SAVING_TASK_PROGRESS", task.id))
-            chunkmaster.logger.info("[DIAG] stopAll: saving task=$id to db") // DIAG: remove after bug fix
-            val diagSaveStart = System.currentTimeMillis() // DIAG: remove after bug fix
-            // Bounded wait — Bukkit async chains may never complete during onDisable, don't hang shutdown
+            // Bounded wait — route the final save through dbExecutor so it serializes
+            // with any periodic save still in flight, but cap it so onDisable can't hang.
             try {
-                saveProgressToDatabase(task.generationTask, id).get(10, TimeUnit.SECONDS)
+                val snap = snapshotForSave(task.generationTask, id)
+                dbExecutor.submit { writeSnapshot(snap) }.get(10, TimeUnit.SECONDS)
             } catch (e: TimeoutException) {
-                chunkmaster.logger.warning("[Chunkmaster] saveProgressToDatabase task=$id timed out after 10s, continuing shutdown")
+                chunkmaster.logger.warning("[Chunkmaster] saveProgress task=$id timed out after 10s, continuing shutdown")
             } catch (e: Exception) {
-                chunkmaster.logger.warning("[Chunkmaster] saveProgressToDatabase task=$id failed: $e")
+                chunkmaster.logger.warning("[Chunkmaster] saveProgress task=$id failed: $e")
             }
-            chunkmaster.logger.info("[DIAG] stopAll: saved task=$id took ${System.currentTimeMillis() - diagSaveStart}ms, cancelling") // DIAG: remove after bug fix
-            val diagCancelStart = System.currentTimeMillis() // DIAG: remove after bug fix
             if (!task.cancel(chunkmaster.config.getLong("mspt-pause-threshold"))) {
                 chunkmaster.logger.warning(chunkmaster.langManager.getLocalized("CANCEL_FAIL", task.id))
             }
-            chunkmaster.logger.info("[DIAG] stopAll: cancelled task=$id took ${System.currentTimeMillis() - diagCancelStart}ms") // DIAG: remove after bug fix
             removalSet.add(task)
 
             chunkmaster.logger.info(chunkmaster.langManager.getLocalized("TASK_CANCELLED", task.id))
         }
         tasks.removeAll(removalSet)
-        if (unloader.pendingSize > 0) {
-            chunkmaster.logger.info(chunkmaster.langManager.getLocalized("SAVING_CHUNKS", unloader.pendingSize))
-            chunkmaster.logger.info("[DIAG] stopAll: running unloader with ${unloader.pendingSize} chunks") // DIAG: remove after bug fix
-            val diagUnloadStart = System.currentTimeMillis() // DIAG: remove after bug fix
-            unloader.run()
-            chunkmaster.logger.info("[DIAG] stopAll: unloader.run done in ${System.currentTimeMillis() - diagUnloadStart}ms") // DIAG: remove after bug fix
+        for (world in worldsToSave) {
+            try {
+                world.save()
+            } catch (e: Exception) {
+                chunkmaster.logger.warning("Failed to save world ${world.name} during shutdown: $e")
+            }
         }
-        chunkmaster.logger.info("[DIAG] stopAll done") // DIAG: remove after bug fix
+        dbExecutor.shutdown()
+        try {
+            if (!dbExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                dbExecutor.shutdownNow()
+            }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            dbExecutor.shutdownNow()
+        }
     }
 
     /**
@@ -275,7 +310,9 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
     }
 
     /**
-     * Saves the task progress
+     * Saves the task progress.
+     * Snapshots task state on the calling thread (Bukkit main, from the periodic timer),
+     * then dispatches the actual JDBC writes to dbExecutor so ticks aren't blocked.
      */
     private fun saveProgress() {
         for (task in tasks) {
@@ -285,11 +322,54 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
                 } else {
                     reportGenerationProgress(task)
                 }
-                saveProgressToDatabase(task.generationTask, task.id)
+                val snap = snapshotForSave(task.generationTask, task.id)
+                dbExecutor.submit {
+                    try {
+                        writeSnapshot(snap)
+                    } catch (e: Exception) {
+                        chunkmaster.logger.warning(
+                            chunkmaster.langManager.getLocalized("TASK_SAVE_FAILED", e.toString())
+                        )
+                    }
+                }
             } catch (error: Exception) {
                 chunkmaster.logger.warning(chunkmaster.langManager.getLocalized("TASK_SAVE_FAILED", error.toString()))
                 error.printStackTrace()
             }
+        }
+    }
+
+    /**
+     * Captures everything writeSnapshot needs into immutable lists so the dbExecutor
+     * thread doesn't read live worker-thread state.
+     */
+    private fun snapshotForSave(task: GenerationTask, id: Int): TaskSaveSnapshot {
+        val pending = if (task is DefaultGenerationTask) task.pendingChunks.map { it.coordinates } else emptyList()
+        val missing = synchronized(task.missingChunks) { task.missingChunks.toList() }
+        return TaskSaveSnapshot(id, task.lastChunkCoords, task.state, pending, missing)
+    }
+
+    private data class TaskSaveSnapshot(
+        val id: Int,
+        val lastChunkCoords: ChunkCoordinates,
+        val state: TaskState,
+        val pendingChunks: List<ChunkCoordinates>,
+        val missingChunks: List<ChunkCoordinates>
+    )
+
+    /**
+     * Persists a snapshot. Runs synchronously on the dbExecutor thread (or, for stopAll,
+     * the calling thread). Internal CompletableFuture chains complete inline because
+     * SqliteManager.executeStatement is synchronous.
+     */
+    private fun writeSnapshot(snap: TaskSaveSnapshot) {
+        generationTasks.updateGenerationTask(snap.id, snap.lastChunkCoords, snap.state)
+        pendingChunksTable.clearPendingChunks(snap.id)
+        if (snap.pendingChunks.isNotEmpty()) {
+            pendingChunksTable.addPendingChunks(snap.id, snap.pendingChunks)
+        }
+        if (snap.missingChunks.isNotEmpty()) {
+            pendingChunksTable.addPendingChunks(snap.id, snap.missingChunks)
         }
     }
 
@@ -349,33 +429,6 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
                 genTask.lastChunkCoords.z
             )
         )
-        // DIAG: remove after bug fix
-        if (genTask is DefaultGenerationTask) {
-            val maxPending = chunkmaster.config.getInt("generation.max-pending-chunks")
-            chunkmaster.logger.info(
-                "[DIAG] task=${task.id} pendingChunks=${genTask.pendingChunks.size}/$maxPending unloaderPending=${unloader.pendingSize} threadState=${task.threadState} mspt=${chunkmaster.mspt}"
-            )
-        }
-    }
-
-    /**
-     * Saves the generation progress to the database
-     */
-    private fun saveProgressToDatabase(generationTask: GenerationTask, id: Int): CompletableFuture<Void> {
-        val completableFuture = CompletableFuture<Void>()
-        generationTasks.updateGenerationTask(id, generationTask.lastChunkCoords, generationTask.state).thenAccept {
-            pendingChunksTable.clearPendingChunks(id).thenAccept {
-                if (generationTask is DefaultGenerationTask) {
-                    if (generationTask.pendingChunks.size > 0) {
-                        pendingChunksTable.addPendingChunks(id, generationTask.pendingChunks.map { it.coordinates })
-                    }
-                }
-                pendingChunksTable.addPendingChunks(id, generationTask.missingChunks.toList()).thenAccept {
-                    completableFuture.complete(null)
-                }
-            }
-        }
-        return completableFuture
     }
 
     /**
@@ -398,7 +451,6 @@ class GenerationManager(private val chunkmaster: Chunkmaster, private val server
 
         return DefaultGenerationTask(
             chunkmaster,
-            unloader,
             world,
             start,
             radius,
